@@ -1,0 +1,247 @@
+### Preprocessing the data   Language: R ###
+================================================================
+# loading packages
+library(stringr)
+library(dplyr)
+library(ggplot2)
+library(curl)
+library(tidyverse)
+library(zoo)
+library(zipcode)
+
+events<-read_csv("D:/meetup/events.csv")
+events<-select(events,-description,-group.group_lon,-group.group_lat,-created,-time)
+events$lon[events$lon==0]<-NA
+events$lat[events$lat==0]<-NA
+events <- na.locf(events)
+chicagoevents<-filter(events,city=="Chicago")
+write.csv(chicagoevents,"chicagoevents.csv")
+==================================================================
+
+### Analysis part        Language:Python ###
+===================================================================
+import pandas as pd
+df=pd.read_csv(r'D:\meetup\chicagoevents.csv')
+df=df.drop(columns='Unnamed: 0')
+df.head()
+
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+
+# show the log density of Meetup event locations
+allLat  = np.array(df['lat'])
+allLong = np.array(df['lon'])
+
+imageSize = (200,200)
+longRange = [-87.9,-87.4]
+latRange = [41.6,42.1]
+
+allLatInds  = imageSize[0] - (imageSize[0] * (allLat  - latRange[0])  / (latRange[1]  - latRange[0]) ).astype(int)
+allLongInds =                (imageSize[1] * (allLong - longRange[0]) / (longRange[1] - longRange[0])).astype(int)
+
+locationDensityImage = np.zeros(imageSize)
+for latInd, longInd in zip(allLatInds,allLongInds):
+    locationDensityImage[latInd,longInd] += 1
+
+fig, ax = plt.subplots(nrows=1,ncols=1,figsize=(12,12))
+ax.imshow(np.log(locationDensityImage+1),cmap='hot')
+ax.set_axis_off()
+
+zipcode=pd.read_csv(r"D:/meetup/chicagozip.csv")
+zipcode.drop(columns="Unnamed: 0",inplace=True)
+
+zipcode_uni=pd.DataFrame(df["zipcode"].unique())
+zipcode_uni.columns=['zip']
+
+zipcode=pd.merge(zipcode,zipcode_uni,on='zip',how='inner')
+
+import folium
+
+map_chicago = folium.Map(location=[41.8781,-87.6298], zoom_start=10)
+
+# add markers to map
+for lat, lng, zipc in zip(zipcode['latitude'], zipcode['longitude'], zipcode['zip']):
+    label = '{}'.format(zipc)
+    label = folium.Popup(label, parse_html=True)
+    folium.CircleMarker(
+        [lat, lng],
+        radius=5,
+        popup=label,
+        color='blue',
+        fill=True,
+        fill_color='#3186cc',
+        fill_opacity=0.7,
+        parse_html=False).add_to(map_chicago)  
+    
+map_chicago
+
+import requests
+
+def getNearbyVenues(names, latitudes, longitudes, radius=500,LIMIT=50):
+    
+    venues_list=[]
+    for name, lat, lng in zip(names, latitudes, longitudes):
+        print(name)
+            
+        # create the API request URL
+        url = 'https://api.foursquare.com/v2/venues/explore?&client_id={}&client_secret={}&v={}&ll={},{}&radius={}&limit={}'.format(
+            CLIENT_ID, 
+            CLIENT_SECRET, 
+            VERSION, 
+            lat, 
+            lng, 
+            radius, 
+            LIMIT)
+            
+        # make the GET request
+        results = requests.get(url).json()["response"]['groups'][0]['items']
+        
+        # return only relevant information for each nearby venue
+        venues_list.append([(
+            name, 
+            lat, 
+            lng, 
+            v['venue']['name'], 
+            v['venue']['location']['lat'], 
+            v['venue']['location']['lng'],  
+            v['venue']['categories'][0]['name']) for v in results])
+
+    nearby_venues = pd.DataFrame([item for venue_list in venues_list for item in venue_list])
+    nearby_venues.columns = ['zipcode', 
+                  'zipcode latitude', 
+                  'zipcode longitude', 
+                  'Venue', 
+                  'Venue Latitude', 
+                  'Venue Longitude', 
+                  'Venue Category']
+    
+    return(nearby_venues)
+    
+chicago_venues = getNearbyVenues(names=zipcode['zip'],
+                                   latitudes=zipcode['latitude'],
+                                   longitudes=zipcode['longitude']
+                                  )
+                                  
+chicago_onehot = pd.get_dummies(chicago_venues[['Venue Category']], prefix="", prefix_sep="")
+chicago_onehot['zipcode'] = chicago_venues['zipcode'] 
+
+# move neighborhood column to the first column
+fixed_columns = [chicago_onehot.columns[-1]] + list(chicago_onehot.columns[:-1])
+chicago_onehot = chicago_onehot[fixed_columns]
+
+chicago_onehot.head()
+
+chicago_onehot2 = pd.get_dummies(df[['category']], prefix="", prefix_sep="")
+chicago_onehot2['zipcode'] = df['zipcode'] 
+
+# move neighborhood column to the first column
+fixed_columns = [chicago_onehot2.columns[-1]] + list(chicago_onehot2.columns[:-1])
+chicago_onehot2 = chicago_onehot2[fixed_columns]
+
+chicago_onehot2.head()
+
+chicago_grouped1 = chicago_onehot.groupby('zipcode').mean().reset_index()
+chicago_grouped1
+
+chicago_grouped2 = chicago_onehot2.groupby('zipcode').mean().reset_index()
+chicago_grouped2
+
+chicago_grouped=pd.merge(chicago_grouped1,chicago_grouped2,on='zipcode',how='left')
+
+def return_most_common(row, num_top):
+    row_categories = row.iloc[1:]
+    row_categories_sorted = row_categories.sort_values(ascending=False)
+    
+    return row_categories_sorted.index.values[0:num_top]
+    
+num_top = 5
+
+indicators = ['st', 'nd', 'rd']
+
+# create columns according to number of top venues
+columns = ['zipcode']
+for ind in np.arange(num_top):
+    try:
+        columns.append('{}{} Most Common Venue'.format(ind+1, indicators[ind]))
+    except:
+        columns.append('{}th Most Common Venue'.format(ind+1))
+
+# create a new dataframe
+venues_sorted = pd.DataFrame(columns=columns)
+venues_sorted['zipcode'] = chicago_grouped1['zipcode']
+
+for ind in np.arange(chicago_grouped1.shape[0]):
+    venues_sorted.iloc[ind, 1:] = return_most_common(chicago_grouped1.iloc[ind, :], num_top)
+
+venues_sorted.head()
+
+columns=['zipcode']
+for ind in np.arange(num_top):
+    try:
+        columns.append('{}{} Most Common Event'.format(ind+1, indicators[ind]))
+    except:
+        columns.append('{}th Most Common Event'.format(ind+1))
+
+# create a new dataframe
+events_sorted = pd.DataFrame(columns=columns)
+events_sorted['zipcode'] = chicago_grouped2['zipcode']
+
+for ind in np.arange(chicago_grouped2.shape[0]):
+    events_sorted.iloc[ind, 1:] = return_most_common(chicago_grouped2.iloc[ind, :], num_top)
+
+events_sorted.head()
+
+zip_venue_event=pd.merge(venues_sorted,events_sorted,on='zipcode',how='left')
+zip_venue_event
+
+from sklearn.cluster import KMeans
+# set number of clusters
+kclusters = 3
+
+chicago_grouped_clustering = chicago_grouped.drop('zipcode', 1)
+
+# run k-means clustering
+kmeans = KMeans(n_clusters=kclusters, random_state=0).fit(chicago_grouped_clustering)
+
+# check cluster labels generated for each row in the dataframe
+kmeans.labels_[0:10] 
+
+# add clustering labels
+zip_venue_event.insert(0, 'Cluster Labels', kmeans.labels_)
+
+chicago_merged = zipcode
+
+# merge to add latitude/longitude for each zipcode
+chicago_merged =pd.merge(chicago_merged,zip_venue_event.set_index('zipcode'), left_on='zip',right_on='zipcode',how='inner')
+
+chicago_merged
+
+import matplotlib.cm as cm
+import matplotlib.colors as colors
+
+
+# create map
+map_clusters = folium.Map(location=[41.8781,-87.6298], zoom_start=11)
+
+# set color scheme for the clusters
+x = np.arange(kclusters)
+ys = [i + x + (i*x)**2 for i in range(kclusters)]
+colors_array = cm.rainbow(np.linspace(0, 1, len(ys)))
+rainbow = [colors.rgb2hex(i) for i in colors_array]
+
+# add markers to the map
+markers_colors = []
+for lat, lon, poi, cluster in zip(chicago_merged['latitude'], chicago_merged['longitude'], chicago_merged['zip'], chicago_merged['Cluster Labels']):
+    label = folium.Popup(str(poi) + ' Cluster ' + str(cluster), parse_html=True)
+    folium.CircleMarker(
+        [lat, lon],
+        radius=5,
+        popup=label,
+        color=rainbow[cluster-1],
+        fill=True,
+        fill_color=rainbow[cluster-1],
+        fill_opacity=0.7).add_to(map_clusters)
+       
+map_clusters
+                                  
